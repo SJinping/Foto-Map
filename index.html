@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+
+<head>
+    <meta charset="UTF-8">
+    <title>onedrive explorer</title>
+    <link rel="stylesheet" type="text/css" href="css/style.css" />
+    <script type="text/javascript" src="https://code.jquery.com/jquery-1.11.1.min.js"></script>
+    <link rel="stylesheet" type="text/css" href="css/style.css">
+    <!-- Latest compiled and minified CSS -->
+    <link rel="stylesheet" href="css/bootstrap.min.css">
+    <!-- Optional theme -->
+    <link rel="stylesheet" href="css/bootstrap-theme.min.css">
+    <!-- Latest compiled and minified JavaScript -->
+    <script src="js/bootstrap.min.js"></script>
+    <script type="text/javascript" src="js/app.js"></script>
+    <script id="odauth" src="odauth.js" clientId="YourClientID" scopes="onedrive.readonly wl.signin" redirectUri="https://idea.cs.nthu.edu.tw/~pan/foto-map/onedrive-explorer-js/callback.html"></script>
+    <script type="text/javascript" src="js/markerclusterer.js"></script>
+</head>
+
+<body>
+    <div id="od-breadcrumb"></div>
+    <!-- <div class="container"> -->
+    <button id="build-map" type="button" class="btn btn-primary btn-block btn-lg" style="visibility: hidden;" onclick="buildMap()">Build Your Map</button>
+    <!--  </div> -->
+    <div id="od-content" style="visibility: visible;">
+        <div id="od-items" class="od-pagecol"></div>
+        <div id="od-json" class="od-pagecol"></div>
+    </div>
+    <div id="map" style="visibility:hidden;"></div>
+    <footer>
+        <script src="https://maps.googleapis.com/maps/api/js?key=YourKey&callback=myMap"></script>
+    </footer>
+    <script>
+    // we use the url fragment to specify the file path within onedrive
+    // (eg. #/pictures/foo.jpg), so we bind to the hashchange event to
+    // know when it changes. in cases where we change the hash from
+    // within this app due to a user click, we call odauth ourselves and
+    // pre-set loadedFromHash to the new value so that this handler doesn't
+    // call odauth() again. this is so that we handle the auth popup properly.
+    // odauth can either be called in response to a user click (in which)
+    // case it's allowed to pop up an auth dialog, or with no user click,
+    // in which case it's only allowed to show a 'sign-in' button (if it
+    // tried to pop up a window, most browsers' popup blockers would block it).
+    // this handler needs to call odauth in non-click mode since it doesn't
+    // know why the hash changed.
+
+    var imgData = null;
+    var childrenCount = 0;
+
+    var loadedForHash = "";
+    $(window).bind('hashchange', function() {
+        if (window.location.hash != loadedForHash) {
+            loadedForHash = window.location.hash;
+            odauth();
+        }
+
+        return false;
+    });
+
+    // we bind to jquery's ajax start/stop events so that we can style the
+    // page differently when a network call is being made
+    $(document).on({
+        ajaxStart: function() {
+            $('body').addClass('loading');
+        },
+        ajaxStop: function() {
+            $('body').removeClass('loading');
+        }
+    });
+
+    // based on http://jsfiddle.net/KJQ9K/554/
+    function syntaxHighlight(obj) {
+        var json = JSON.stringify(obj, undefined, 2)
+        json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+            function(match) {
+                var cls = 'number';
+                if (/^"/.test(match)) {
+                    if (/:$/.test(match)) {
+                        cls = 'key';
+                    } else {
+                        cls = 'string';
+                    }
+                } else if (/true|false/.test(match)) {
+                    cls = 'boolean';
+                } else if (/null/.test(match)) {
+                    cls = 'null';
+                }
+                return '<span class="' + cls + '">' + match + '</span>';
+            });
+    }
+
+    // called to update the breadcrumb bar at the top of the page
+    function updateBreadcrumb(decodedPath) {
+        var path = decodedPath || '';
+        $('#od-breadcrumb').empty();
+        var runningPath = '';
+        var segments = path.split('/');
+        for (var i = 0; i < segments.length; i++) {
+            if (i > 0) {
+                $('<span>').text(' > ').appendTo("#od-breadcrumb");
+            }
+
+            var segment = segments[i];
+            if (segment) {
+                runningPath = runningPath + '/' + encodeURIComponent(segment);
+            } else {
+                segment = 'root';
+            }
+
+            $('<a>').
+            attr("href", "#" + runningPath).
+            click(function() {
+                // when the page changes in response to a user click,
+                // we set loadedForHash to the new value and call
+                // odauth ourselves in user-click mode. this causes
+                // the catch-all hashchange event handler not to
+                // process the page again. see comment at the top.
+                showMap(false);
+                loadedForHash = $(this).attr('href');
+                window.location = loadedForHash;
+                odauth(true);
+            }).
+            text(segment).
+            appendTo("#od-breadcrumb");
+        }
+    }
+
+    function showMap(isShow) {
+        if (isShow) {
+            $("#od-content").empty();
+            document.getElementById("od-content").style.visibility = "hidden";
+            document.getElementById("map").style.visibility = "visible";
+        } else {
+            document.getElementById("od-content").style.visibility = "visible";
+            document.getElementById("map").style.visibility = "hidden";
+        }
+    }
+
+    function buildMap() {
+        if (imgData != null) {
+            getImgList(imgData);
+        }
+
+        showMap(true);
+
+        if (location_img_list.length > 0) {
+            marker_list = new Array();
+            infowindow_list = new Array();
+            var mapCanvas = document.getElementById("map");
+            var myCenter = new google.maps.LatLng(location_img_list[0][1], location_img_list[0][2]);
+            var mapOptions = {
+                center: new google.maps.LatLng(23.79, 120.79),
+                zoom: 7
+            }
+            var map = new google.maps.Map(mapCanvas, mapOptions);
+            var arrayLength = location_img_list.length;
+            for (var i = 0; i < arrayLength; i++) {
+                placeMarker(map, location_img_list[i]);
+            }
+            for (var i = 0; i < marker_list.length; i++) {
+                marker_list[i].setMap(map);
+            }
+
+            // Add a marker clusterer to manage the markers.
+            var markerCluster = new MarkerClusterer(map, marker_list, {
+                imagePath: 'img/cluster/'
+            });
+            // var markerCluster = new MarkerClusterer(map, marker_list);
+
+            resizeIcon(map);
+        } else {
+            alert("No picture available.")
+        }
+    }
+
+    // odauth calls our onAuthenticated method to give us the user's auth token.
+    // in this demo app we just use this as the method to drive the page logic
+    function onAuthenticated(token, authWindow) {
+        if (token) {
+            if (authWindow) {
+                removeLoginButton();
+                authWindow.close();
+            }
+
+            (function($) {
+                // we extract the onedrive path from the url fragment and we
+                // flank it with colons to use the api's path-based addressing scheme
+                var path = "";
+                var beforePath = "";
+                var afterPath = "";
+                if (window.location.hash) {
+                    path = window.location.hash.substr(1);
+                    beforePath = ":";
+                    afterPath = ":";
+                }
+
+                var odurl = "https://api.onedrive.com/v1.0/drive/root" + beforePath + path + afterPath;
+
+                // the expand and select parameters mean:
+                //  "for the item i'm addressing, include its thumbnails and children,
+                //   and for each of the children, include its thumbnails. for those
+                //   thumbnails, return the 'large' and 'c200x150_Crop' sizes"
+                // we also attach the access token as a query parameter to every request.
+                // we could also pass it in through the 'Authorization: bearer' header,
+                // but that would result in an extra CORS preflight request for every
+                // unique path.
+                 var odquery = "";
+                if (childrenCount == 0) {
+                   odquery = "?expand=thumbnails,children(expand=thumbnails(select=large,c200x150_Crop)),children(orderby=lastModifiedDateTime%20desc)&access_token=" + token;
+                } else {
+                    odquery = "?expand=thumbnails,children(expand=thumbnails(select=large,c200x150_Crop)),children(top=" + childrenCount + "),children(orderby=lastModifiedDateTime%20desc)&access_token=" + token;
+                }
+
+                // console.log(odurl+odquery);
+
+                $.ajax({
+                    url: odurl + odquery,
+                    dataType: 'json',
+                    success: function(data) {
+                        if (data) {
+                            // clear out the old content
+                            $('#od-items').empty();
+                            $('#od-json').empty();
+
+                            // add the syntax-highlighted json response
+                            // $("<pre>").html(syntaxHighlight(data)).appendTo("#od-json");
+
+                            // process the response data. if we get back children (data.children)
+                            // then render the tile view. otherwise, render the "one-up" view
+                            // for the item's individual data. we also look for children in
+                            // 'data.value' because if this app is ever configured to reqeust
+                            // '/children' directly instead of '/parent?expand=children', then
+                            // they'll be in an array called 'data'
+                            var decodedPath = decodeURIComponent(path);
+                            document.title = "1drv " + decodedPath;
+                            updateBreadcrumb(decodedPath);
+                            var children = data.children || data.value;
+
+
+                            if (children && children.length > 0) {
+                                $.each(children, function(i, item) {
+                                    var tile = $("<div>").
+                                    attr("href", "#" + path + "/" + encodeURIComponent(item.name)).
+                                    addClass("item").
+                                    click(function() {
+                                        // when the page changes in response to a user click,
+                                        // we set loadedForHash to the new value and call
+                                        // odauth ourselves in user-click mode. this causes
+                                        // the catch-all hashchange event handler not to
+                                        // process the page again. see comment at the top.
+                                        loadedForHash = $(this).attr('href');
+                                        window.location = loadedForHash;
+                                        odauth(true);
+                                    }).
+                                    appendTo("#od-items");
+
+                                    // look for various facets on the items and style them accordingly
+                                    if (item.folder) {
+                                        tile.addClass("folder");
+                                    }
+
+                                    if (item.thumbnails && item.thumbnails.length > 0) {
+                                        $("<img>").
+                                        attr("src", item.thumbnails[0].c200x150_Crop.url).
+                                        attr("height", "auto").
+                                        attr("width", "auto").
+                                        attr("max-width", "200px").
+                                        attr("max-height", "150px").
+                                        appendTo(tile);
+                                    }
+
+                                    $("<div>").
+                                    addClass("nameplate").
+                                    text(item.name).
+                                    appendTo(tile);
+
+                                    imgData = data
+                                        // show the button
+                                    document.getElementById('build-map').style.visibility = "visible";
+                                });
+                            } else {
+                                // 1-up view
+                                var tile = $("<div>").
+                                addClass("item").
+                                addClass("oneup").
+                                appendTo("#od-items");
+
+                                var downloadUrl = data['@content.downloadUrl'];
+                                if (downloadUrl) {
+                                    tile.click(function() {
+                                        window.location = downloadUrl;
+                                    });
+                                }
+
+                                if (data.folder) {
+                                    tile.addClass("folder");
+                                    childrenCount = data.folder.childrenCount;
+                                }
+
+                                if (data.thumbnails && data.thumbnails.length > 0) {
+                                    $("<img>").
+                                    attr("src", data.thumbnails[0].large.url).
+                                    attr("height", "auto").
+                                    attr("width", "auto").
+                                    attr("max-width", "200px").
+                                    attr("max-height", "150px").
+                                    appendTo(tile);
+                                }
+
+                            }
+                        } else { // can't get data
+                            $('#od-items').empty();
+                            $('<p>error.</p>').appendTo('#od-items');
+                            $('#od-json').empty();
+                        }
+                    }
+                });
+            })(jQuery);
+        } else {
+            alert("Error signing in");
+        }
+    }
+
+    // function odauth(wasClicked) {
+    //     // ensureHttps();
+    //     var token = getTokenFromCookie();
+    //     if (token) {
+    //         onAuthenticated(token);
+    //     } else if (wasClicked) {
+    //         challengeForAuth();
+    //     } else {
+    //         showLoginButton();
+    //     }
+    // }
+
+    // start the whole thing off by calling odauth() in non-click mode.
+    // if the user isn't logged in already, a sign-in link will appear
+    // for them to click.
+    odauth();
+
+    (function(i, s, o, g, r, a, m) {
+        i['GoogleAnalyticsObject'] = r;
+        i[r] = i[r] || function() {
+            (i[r].q = i[r].q || []).push(arguments)
+        }, i[r].l = 1 * new Date();
+        a = s.createElement(o),
+            m = s.getElementsByTagName(o)[0];
+        a.async = 1;
+        a.src = g;
+        m.parentNode.insertBefore(a, m)
+    })(window, document, 'script', 'https://www.google-analytics.com/analytics.js', 'ga');
+
+    ga('create', 'UA-88969614-1', 'auto');
+    ga('send', 'pageview');
+    </script>
+</body>
+
+</html>
